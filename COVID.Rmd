@@ -1,0 +1,142 @@
+---
+title: "COVID Data Investigation Report"
+author: "Chris Toth"
+date: "2022-06-19"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Introduction
+
+With this analysis, I intend to investigate how population density affect COVID case rates.  With a disease like COVID which undergoes respiratory transmission, I would expect to see areas with higher population density to exhibit higher case rates and mortality rates.  To conduct this analysis, I will normalize total cases and deaths to population to obtain case rates, and normalize populations to obtain population density. 
+
+
+## Data Source
+
+The source for the COVID data and a description of what the data is can be found here:
+<https://github.com/CSSEGISandData/COVID-19>.
+
+Population data was acquired from the US Census Bureau at:
+<https://www.census.gov/data/datasets/time-series/demo/popest/2010s-state-total.html#par_textimage_1873399417>
+(download file: nst-est2019-alldata.csv)
+
+State areas were acquired from: 
+<https://github.com/jakevdp/data-USstates/blob/master/state-areas.csv>
+
+## Import Data
+```{r import, echo=TRUE, results='hide',message=FALSE}
+library(tidyverse)
+library(RCurl)
+
+covid_data_file <- getURL("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports_us/06-18-2022.csv")
+covid_data <- read_csv(covid_data_file)
+state_pop_file <- getURL("https://www2.census.gov/programs-surveys/popest/datasets/2010-2019/national/totals/nst-est2019-alldata.csv")
+state_pops <- read_csv(state_pop_file)
+area_data_file <- getURL("https://raw.githubusercontent.com/jakevdp/data-USstates/master/state-areas.csv")
+area_data <- read_csv(area_data_file)
+```
+
+The raw, untidy data is initially divided across 3 tables, one for covid data by state, one for state land area, and another for state populations:
+
+```{r raw_data, echo=TRUE, message=TRUE}
+covid_data
+state_pops
+area_data
+```
+
+## Tidy and Transform Data
+
+Prepare data for analysis by:
+ -  Converting columns to appropriate data types
+ -  Dropping unnecessary columns
+ -  Joining tables on State name
+ -  Sanitize column names
+ 
+Then normalize cases and deaths to population and normalize population to land area, so we have cases and deaths per capita and population density. 
+ 
+No further transformation will be applied at this point because because each row will correspond to an individual observation and each column will correspond to a parameter.
+
+
+```{r tidy_and_join, echo=TRUE,message=FALSE}
+state_pops <- state_pops %>% 
+  mutate(STATE = NAME) %>%
+  mutate(pop_2019 = POPESTIMATE2019) %>%
+  select(c(STATE,pop_2019))
+
+covid_data <- covid_data %>% 
+  select(c(Province_State,Confirmed,Deaths)) %>%
+  rename(STATE = Province_State)  
+
+area_data <- area_data %>% 
+  rename(SQMI = `area (sq. mi)`) %>%
+  rename(STATE = state)
+
+covid_data <- covid_data %>%
+    inner_join(area_data,by = "STATE") %>%
+    inner_join(state_pops,by = "STATE")
+
+covid_data <- covid_data %>%
+    mutate(CASES_PC = Confirmed/pop_2019) %>%
+    mutate(DEATHS_PC = Deaths/pop_2019) %>%
+    mutate(POP_DENS = pop_2019/SQMI) %>%
+    select(c(STATE,CASES_PC,DEATHS_PC,POP_DENS))
+
+covid_data <- covid_data %>%
+    mutate(LOG_POP_DENS = log10(covid_data$POP_DENS)) %>%
+    mutate(MORT_RATE = DEATHS_PC/CASES_PC)
+
+```
+
+The log of population was also computed to to better utilize the dynamic range in subsequent colorbars, but was not found to be useful in any quantitative analysis
+
+The final data, after transformations looks as follows:
+```{r tidy_disp, echo=FALSE, message=TRUE}
+covid_data
+```
+
+## Controls on mortality rate
+
+For a preliminary investigation of how the key variables relate to each other, I made the following scatter plots:
+
+```{r casesVdeaths_graph, echo=TRUE,message=FALSE}
+ggplot(data = covid_data) + geom_point(mapping = aes(x = CASES_PC, y = DEATHS_PC, color = LOG_POP_DENS))
+```
+
+There is a general positive correlation between deaths rate and case rate, but neither of these variables seems to have a very positive correlation to population density.  However, a positive correlation between cases and deaths is to be expected.  Instead, let's normalise deaths to cases and look at mortality rate instead:
+
+```{r mortRate_graph, echo=TRUE,message=FALSE}
+ggplot(data = covid_data) + geom_point(mapping = aes(x = CASES_PC, y = MORT_RATE, color = LOG_POP_DENS))
+```
+
+Even looking at mortality rate, there does not appear to be an obvious relationship to population density or case rate.
+
+If we look at a correlation matrix instead, we can see the more objectively how well related these variables are to each other: 
+
+```{r correlation_matrix, echo=FALSE,message=TRUE}
+cor(covid_data %>% select(-STATE))
+```
+
+According to the correlation matrix, in addition to the positive relationship between deaths per capita and case rate, there also appears to be a potentially weak negative correlation between deaths per capita and population density.
+
+## Multivariate Regression
+
+Here we generate a multivariate linear regression model to predict deaths per capita, using only the two parameters the correlation matrix suggests have the best relationship to deaths per capita
+
+```{r multireg_model, echo=FALSE, message=TRUE}
+lm(DEATHS_PC ~ CASES_PC + POP_DENS, data = covid_data)
+```
+
+The results of the linear regression indicate that the mortality rate of COVID-19 over the course of the pandemic is approximately 8 deaths per thousand cases.  The coefficient on the population density term is small but negative, indicating that higher population densities counter-intuitively predict a lower number of deaths per capita.
+
+
+## Conclusions and Biases
+
+As seen in the correlation analysis, higher population densities are surprisingly weakly correlated to a *lower* case rate. One possible explanation for this is that perhaps densely populated areas implemented stricter or better public health measures  
+
+There are a few potential sources of bias in this data and the statistical approach.  The most significant source of error comes from doing this analysis on the state-level, population density can vary greatly within any state, so a county level analysis might have yielded clearer results.  
+
+An additional source of bias in the data might be political in nature.  Areas with lower-population density tend to vote more Republican, which as a party may have been reluctant to embrace government intervention during the pandemic, affecting the case numbers that are reported in their area.
+
+
